@@ -1,0 +1,25 @@
+[package]
+name = "sync-vault"
+version = "0.1.0"
+edition = "2021"
+description = "Intelligent incremental file sync and backup tool"
+
+[dependencies]
+eframe = "0.31"
+egui = "0.31"
+notify = "6"
+sha2 = "0.10"
+hex = "0.4"
+walkdir = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+num_cpus = "1"
+rfd = "0.17.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
