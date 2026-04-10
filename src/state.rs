@@ -95,25 +95,39 @@ fn config_path() -> Option<PathBuf> {
         .join("config.json"))
 }
 
-/// Check if any path segment matches an exclude pattern — O(1) per segment via HashSet
-pub fn is_excluded(rel: &str, excludes: &[String]) -> bool {
-    // Build a quick lookup set (small enough that stack allocation is fine)
-    // For hot paths this is called per-file, so we accept the small alloc
-    let exact: std::collections::HashSet<&str> = excludes.iter()
-        .filter(|p| !p.starts_with("*."))
-        .map(|s| s.as_str())
-        .collect();
-    let exts: Vec<&str> = excludes.iter()
-        .filter_map(|p| p.strip_prefix("*."))
-        .collect();
+/// Pre-compiled exclude patterns for efficient matching
+pub struct ExcludeSet {
+    exact: std::collections::HashSet<String>,
+    exts: Vec<String>,
+}
 
-    for segment in rel.split('/') {
-        if exact.contains(segment) { return true; }
-        for ext in &exts {
-            if segment.ends_with(&format!(".{}", ext)) { return true; }
-        }
+impl ExcludeSet {
+    pub fn new(excludes: &[String]) -> Self {
+        let exact = excludes.iter()
+            .filter(|p| !p.starts_with("*."))
+            .cloned()
+            .collect();
+        let exts = excludes.iter()
+            .filter_map(|p| p.strip_prefix("*.").map(|s| s.to_string()))
+            .collect();
+        Self { exact, exts }
     }
-    false
+
+    pub fn matches(&self, rel: &str) -> bool {
+        for segment in rel.split('/') {
+            if self.exact.contains(segment) { return true; }
+            for ext in &self.exts {
+                if segment.ends_with(&format!(".{}", ext)) { return true; }
+            }
+        }
+        false
+    }
+}
+
+/// Check if any path segment matches an exclude pattern
+#[allow(dead_code)]
+pub fn is_excluded(rel: &str, excludes: &[String]) -> bool {
+    ExcludeSet::new(excludes).matches(rel)
 }
 
 pub fn default_excludes() -> Vec<String> {

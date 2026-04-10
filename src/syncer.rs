@@ -1,4 +1,4 @@
-use crate::state::{is_excluded, FileRecord, Store};
+use crate::state::{ExcludeSet, FileRecord, Store};
 use anyhow::Result;
 use chrono::Local;
 use sha2::{Digest, Sha256};
@@ -34,6 +34,7 @@ fn scan_needed(
     excludes: &[String],
     tx: &std::sync::mpsc::Sender<SyncEvent>,
 ) -> (Vec<(String, PathBuf, u64, String)>, std::collections::HashSet<String>) {
+    let ex = ExcludeSet::new(excludes); // compile once, reuse per file
     let mut to_copy: Vec<(String, PathBuf, u64, String)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut scanned = 0usize;
@@ -51,7 +52,7 @@ fn scan_needed(
             let _ = tx.send(SyncEvent::Progress { scanned, total: 0 });
         }
 
-        if is_excluded(&rel, excludes) { continue; }
+        if ex.matches(&rel) { continue; }
         seen.insert(rel.clone());
 
         let size = match std::fs::metadata(abs) {
@@ -145,8 +146,11 @@ fn atomic_copy(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Write to <dst>.tmp first
-    let tmp = dst.with_extension("__svtmp__");
+    // Append .svtmp to full filename (not replace extension) to avoid name collisions
+    let tmp = dst.with_file_name(format!(
+        "{}.svtmp",
+        dst.file_name().unwrap_or_default().to_string_lossy()
+    ));
     match std::fs::copy(src, &tmp) {
         Ok(bytes) => {
             // Atomic rename
@@ -183,7 +187,7 @@ pub fn sync_file(
         Err(_) => return,
     };
 
-    if is_excluded(&rel, excludes) { return; }
+    if ExcludeSet::new(excludes).matches(&rel) { return; }
 
     let dst_path = dst.join(abs.strip_prefix(src).unwrap());
 

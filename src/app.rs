@@ -18,7 +18,9 @@ pub struct App {
     paused: bool,              // pause watcher events without stopping
     store: Arc<Mutex<Store>>,
     log: VecDeque<(Color32, String)>,
-    log_filter: String,        // filter log by keyword
+    log_filter: String,
+    log_filter_lc: String,     // cached lowercase, updated only when filter changes
+    dst_error: Option<String>,
     progress: Option<usize>,
     session_copied: usize,
     session_bytes: u64,
@@ -46,6 +48,8 @@ impl Default for App {
             store: Arc::new(Mutex::new(Store::load())),
             log: VecDeque::new(),
             log_filter: String::new(),
+            log_filter_lc: String::new(),
+            dst_error: None,
             progress: None,
             session_copied: 0,
             session_bytes: 0,
@@ -76,7 +80,18 @@ impl App {
             self.src_error = Some(format!("路径不存在: {}", self.cfg.src));
             return;
         }
+        // Guard: src == dst would cause infinite loop
+        if src == dst {
+            self.src_error = Some("源目录和目标目录不能相同".to_string());
+            return;
+        }
+        // Guard: dst inside src would cause recursive copy
+        if dst.starts_with(&src) {
+            self.dst_error = Some("目标目录不能是源目录的子目录".to_string());
+            return;
+        }
         self.src_error = None;
+        self.dst_error = None;
         if !dst.exists() {
             if std::fs::create_dir_all(&dst).is_err() {
                 self.push_log(Color32::RED, format!("❌ 无法创建目标路径: {}", self.cfg.dst));
@@ -250,14 +265,24 @@ impl eframe::App for App {
             }
             ui.horizontal(|ui| {
                 ui.label("目标目录:");
-                ui.add(TextEdit::singleline(&mut self.cfg.dst)
-                    .desired_width(220.0).hint_text("备份到哪里…"));
+                let resp = ui.add(TextEdit::singleline(&mut self.cfg.dst)
+                    .desired_width(220.0).hint_text("备份到哪里…")
+                    .text_color(if self.dst_error.is_some() {
+                        Color32::from_rgb(255, 100, 100)
+                    } else {
+                        ui.visuals().text_color()
+                    }));
+                if resp.changed() { self.dst_error = None; }
                 if ui.button("📁").clicked() {
                     if let Some(p) = rfd::FileDialog::new().pick_folder() {
                         self.cfg.dst = p.to_string_lossy().replace('\\', "/");
+                        self.dst_error = None;
                     }
                 }
             });
+            if let Some(ref err) = self.dst_error {
+                ui.label(RichText::new(err).small().color(Color32::from_rgb(255, 100, 100)));
+            }
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.cfg.delete_removed, "同步删除")
                     .on_hover_text("源目录删除的文件，目标目录也同步删除");
@@ -344,11 +369,16 @@ impl eframe::App for App {
                 if ui.small_button("清空").clicked() { self.log.clear(); }
             });
             ui.separator();
-            let filter_lc = self.log_filter.to_lowercase();
+            let filter_lc = {
+                // Update cache only when filter changes
+                let new_lc = self.log_filter.to_lowercase();
+                if new_lc != self.log_filter_lc { self.log_filter_lc = new_lc; }
+                &self.log_filter_lc
+            };
             let filtered: Vec<&(Color32, String)> = if filter_lc.is_empty() {
                 self.log.iter().collect()
             } else {
-                self.log.iter().filter(|(_, m)| m.to_lowercase().contains(&filter_lc)).collect()
+                self.log.iter().filter(|(_, m)| m.to_lowercase().contains(filter_lc.as_str())).collect()
             };
             let n = filtered.len();
             if n == 0 && self.log.is_empty() {
