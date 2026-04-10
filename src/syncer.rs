@@ -109,7 +109,7 @@ pub fn full_sync(
 
     // Phase 2: copy files and update state
     for (rel, abs, size, hash) in to_copy {
-        let dst_path = dst.join(PathBuf::from(&rel));
+        let dst_path = dst.join(&rel);
         atomic_copy(&abs, &dst_path, &rel, hash, size, store, tx);
     }
 
@@ -120,7 +120,7 @@ pub fn full_sync(
             .cloned()
             .collect();
         for rel in removed {
-            let dst_path = dst.join(PathBuf::from(&rel));
+            let dst_path = dst.join(&rel);
             let _ = std::fs::remove_file(&dst_path);
             store.state.files.remove(&rel);
             store.mark_dirty();

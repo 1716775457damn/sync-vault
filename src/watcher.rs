@@ -1,7 +1,6 @@
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -10,14 +9,12 @@ const DEBOUNCE_MS: u64 = 300;
 
 pub fn start(src: PathBuf, tx: Sender<Vec<PathBuf>>) -> anyhow::Result<RecommendedWatcher> {
     let pending: Arc<Mutex<HashMap<PathBuf, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
-    let stop = Arc::new(AtomicBool::new(false));
-
     let pending_flush = pending.clone();
     let tx_flush = tx.clone();
-    let stop_flush = stop.clone();
 
+    // Flush thread: exits automatically when tx_flush.send fails (receiver dropped on stop)
     std::thread::spawn(move || {
-        while !stop_flush.load(Ordering::Relaxed) {
+        loop {
             std::thread::sleep(Duration::from_millis(100));
             let mut map = pending_flush.lock().unwrap();
             let ready: Vec<PathBuf> = map
@@ -28,7 +25,7 @@ pub fn start(src: PathBuf, tx: Sender<Vec<PathBuf>>) -> anyhow::Result<Recommend
             if !ready.is_empty() {
                 for p in &ready { map.remove(p); }
                 drop(map);
-                if tx_flush.send(ready).is_err() { break; }
+                if tx_flush.send(ready).is_err() { return; } // receiver gone → stop
             }
         }
     });

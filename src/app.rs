@@ -15,11 +15,14 @@ const MAX_LOG: usize = 500;
 pub struct App {
     cfg: Config,
     running: bool,
-    paused: bool,              // pause watcher events without stopping
+    paused: bool,
     store: Arc<Mutex<Store>>,
     log: VecDeque<(Color32, String)>,
     log_filter: String,
-    log_filter_lc: String,     // cached lowercase, updated only when filter changes
+    log_filter_lc: String,
+    log_errors_only: bool,         // quick filter: show only error lines
+    filtered_cache: Vec<usize>,    // cached indices into log, rebuilt on change
+    filtered_dirty: bool,          // true when log or filter changed
     dst_error: Option<String>,
     progress: Option<usize>,
     session_copied: usize,
@@ -49,6 +52,9 @@ impl Default for App {
             log: VecDeque::new(),
             log_filter: String::new(),
             log_filter_lc: String::new(),
+            log_errors_only: false,
+            filtered_cache: Vec::new(),
+            filtered_dirty: true,
             dst_error: None,
             progress: None,
             session_copied: 0,
@@ -191,6 +197,7 @@ impl eframe::App for App {
         }
         if !entries.is_empty() {
             for (c, m) in entries { self.push_log(c, m); }
+            self.filtered_dirty = true;
             ctx.request_repaint();
         }
 
@@ -315,15 +322,18 @@ impl eframe::App for App {
             if self.show_excludes {
                 ui.separator();
                 ui.label(RichText::new("排除规则（文件名、目录名或 *.ext）").small().color(Color32::GRAY));
-                let mut to_remove: Option<usize> = None;
-                egui::Grid::new("excludes").num_columns(2).show(ui, |ui| {
-                    for (i, pat) in self.cfg.excludes.iter().enumerate() {
-                        ui.label(RichText::new(pat).monospace().small());
-                        if ui.small_button("✕").clicked() { to_remove = Some(i); }
-                        ui.end_row();
-                    }
+                // Fixed-height scroll area prevents toolbar from growing and pushing log down
+                ScrollArea::vertical().id_salt("excl").max_height(120.0).show(ui, |ui| {
+                    let mut to_remove: Option<usize> = None;
+                    egui::Grid::new("excludes").num_columns(2).show(ui, |ui| {
+                        for (i, pat) in self.cfg.excludes.iter().enumerate() {
+                            ui.label(RichText::new(pat).monospace().small());
+                            if ui.small_button("✕").clicked() { to_remove = Some(i); }
+                            ui.end_row();
+                        }
+                    });
+                    if let Some(i) = to_remove { self.cfg.excludes.remove(i); self.cfg.save(); }
                 });
-                if let Some(i) = to_remove { self.cfg.excludes.remove(i); self.cfg.save(); }
                 ui.horizontal(|ui| {
                     ui.add(TextEdit::singleline(&mut self.new_exclude)
                         .desired_width(160.0).hint_text("node_modules 或 *.log"));
@@ -355,32 +365,61 @@ impl eframe::App for App {
             });
         });
 
-        // Log panel with virtual scroll
+        // Log panel with cached filter
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("同步日志").strong());
                 ui.label(RichText::new(format!("({} 条)", self.log.len())).small().color(Color32::GRAY));
+                let filter_changed = {
+                    let new_lc = self.log_filter.to_lowercase();
+                    if new_lc != self.log_filter_lc {
+                        self.log_filter_lc = new_lc;
+                        self.filtered_dirty = true;
+                        true
+                    } else { false }
+                };
+                let _ = filter_changed;
                 ui.add(egui::TextEdit::singleline(&mut self.log_filter)
                     .hint_text("过滤日志…")
-                    .desired_width(120.0));
+                    .desired_width(110.0));
                 if !self.log_filter.is_empty() && ui.small_button("✕").clicked() {
                     self.log_filter.clear();
+                    self.log_filter_lc.clear();
+                    self.filtered_dirty = true;
                 }
-                if ui.small_button("清空").clicked() { self.log.clear(); }
+                // Quick error filter toggle
+                let err_col = if self.log_errors_only { Color32::RED } else { Color32::DARK_GRAY };
+                if ui.small_button(RichText::new("❌ 错误").color(err_col))
+                    .on_hover_text("只显示错误日志")
+                    .clicked()
+                {
+                    self.log_errors_only = !self.log_errors_only;
+                    self.filtered_dirty = true;
+                }
+                if ui.small_button("清空").clicked() {
+                    self.log.clear();
+                    self.filtered_dirty = true;
+                }
             });
             ui.separator();
-            let filter_lc = {
-                // Update cache only when filter changes
-                let new_lc = self.log_filter.to_lowercase();
-                if new_lc != self.log_filter_lc { self.log_filter_lc = new_lc; }
-                &self.log_filter_lc
-            };
-            let filtered: Vec<&(Color32, String)> = if filter_lc.is_empty() {
-                self.log.iter().collect()
-            } else {
-                self.log.iter().filter(|(_, m)| m.to_lowercase().contains(filter_lc.as_str())).collect()
-            };
-            let n = filtered.len();
+
+            // Rebuild filter cache only when dirty
+            if self.filtered_dirty {
+                self.filtered_dirty = false;
+                self.filtered_cache = self.log.iter().enumerate()
+                    .filter(|(_, (color, msg))| {
+                        if self.log_errors_only && *color != Color32::RED { return false; }
+                        if !self.log_filter_lc.is_empty() {
+                            return msg.to_lowercase().contains(&self.log_filter_lc);
+                        }
+                        true
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+            }
+
+            let n = self.filtered_cache.len();
+            let is_filtered = !self.log_filter_lc.is_empty() || self.log_errors_only;
             if n == 0 && self.log.is_empty() {
                 ui.centered_and_justified(|ui| {
                     ui.label(RichText::new("设置源目录和目标目录后点击「开始同步」").color(Color32::GRAY));
@@ -390,10 +429,11 @@ impl eframe::App for App {
                     ui.label(RichText::new("无匹配的日志").color(Color32::GRAY));
                 });
             } else {
-                ScrollArea::vertical().stick_to_bottom(filter_lc.is_empty()).auto_shrink(false)
+                ScrollArea::vertical().stick_to_bottom(!is_filtered).auto_shrink(false)
                     .show_rows(ui, 16.0, n, |ui, range| {
                         for i in range {
-                            let (color, msg) = filtered[i];
+                            let log_idx = self.filtered_cache[i];
+                            let (color, msg) = &self.log[log_idx];
                             ui.label(RichText::new(msg).small().color(*color).monospace());
                         }
                     });

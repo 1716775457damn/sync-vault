@@ -117,7 +117,13 @@ impl ExcludeSet {
         for segment in rel.split('/') {
             if self.exact.contains(segment) { return true; }
             for ext in &self.exts {
-                if segment.ends_with(&format!(".{}", ext)) { return true; }
+                // Avoid format! allocation: check suffix directly
+                if segment.len() > ext.len() + 1
+                    && segment.as_bytes()[segment.len() - ext.len() - 1] == b'.'
+                    && segment.ends_with(ext.as_str())
+                {
+                    return true;
+                }
             }
         }
         false
