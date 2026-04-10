@@ -36,9 +36,11 @@ Most backup tools either copy everything every time (slow) or require complex co
 - Changed files are synced immediately after the debounce window
 
 ### Safety
-- All copies use **atomic write**: write to `<file>.__svtmp__` first, then `rename()` to destination
+- All copies use **atomic write**: write to `<file>.svtmp` first, then `rename()` to destination
 - `rename()` is atomic on the same filesystem — destination is never in a partial state
 - Hash snapshot is saved with a 3-second debounce to avoid excessive disk I/O
+- **Source = destination guard** — refuses to start if src and dst are the same path
+- **Recursive copy guard** — refuses to start if dst is inside src
 
 ---
 
@@ -49,6 +51,7 @@ Most backup tools either copy everything every time (slow) or require complex co
 - **Atomic copy** — temp file + rename, no corrupt files on crash or power loss
 - **Delete sync** — optionally mirror deletions from source to destination
 - **Manual resync** — trigger a full scan at any time without restarting
+- **Safety guards** — prevents infinite loops from src=dst or dst-inside-src
 
 ### Monitoring
 - **300ms debounce** — batches rapid file events (IDE saves, build outputs)
@@ -59,15 +62,18 @@ Most backup tools either copy everything every time (slow) or require complex co
 - **Default rules** — `.git`, `.svn`, `node_modules`, `__pycache__`, `target`, `*.tmp`, `*.swp`
 - **Custom rules** — add any filename, directory name, or `*.ext` pattern
 - **Deep matching** — `node_modules` anywhere in the path is excluded, not just at the root
+- **Fixed-height panel** — exclusion rules panel has a fixed height, log area never jumps
 - **Persistent** — exclusion rules saved across restarts
 
 ### Interface
 - **Real-time log** — every sync action logged with timestamp, color-coded by type
-- **Log filter** — search the log by keyword (e.g. type `错误` to see only errors)
+- **Log filter** — search the log by keyword
+- **❌ Errors only** — one-click toggle to show only error lines
 - **Session stats** — files copied and bytes transferred in the current session
 - **Cumulative stats** — total files synced and bytes transferred across all sessions
 - **Scan progress** — shows files scanned during full sync
 - **Config persistence** — source/destination paths and settings restored on restart
+- **Path validation** — red highlight and error message for invalid paths
 
 ---
 
@@ -77,9 +83,9 @@ Most backup tools either copy everything every time (slow) or require complex co
 ┌──────────────────────────────────────────────────────────┐
 │ 源目录:  [/Users/me/project        ] 📁                   │
 │ 目标目录: [/Volumes/Backup/project  ] 📁                   │
-│ [✓ 同步删除]  [▼ 排除规则]  [⏸ 暂停] [🔄 立即同步] [⏹ 停止] │
+│ [✓ 同步删除] [▼ 排除规则] [⏸ 暂停] [🔄 立即同步] [⏹ 停止]  │
 ├──────────────────────────────────────────────────────────┤
-│ 同步日志                    过滤: [错误…] ✕  [清空]        │
+│ 同步日志 (47条)  过滤: [     ] ❌错误  清空               │
 │ [10:23:41] ✅ 开始监控: /project → /Backup/project        │
 │ [10:23:42] 📋 已同步  src/main.rs  (4.2 KB)               │
 │ [10:23:42] 📋 已同步  src/app.rs   (12.1 KB)              │
@@ -100,24 +106,44 @@ Most backup tools either copy everything every time (slow) or require complex co
 2. Download `sync-vault.exe`
 3. Double-click to open
 
+> ✅ No .NET, no Java, no Python, no Visual C++ Redistributable required.  
+> Works on Windows 10 and above.
+
 ### macOS
+
+macOS does not allow running unsigned binaries by default. Build from source:
+
 ```bash
-# Install Rust
+# 1. Install Rust (if not already installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
 
-# Clone and build
+# 2. Clone and build
 git clone https://github.com/1716775457damn/sync-vault.git
 cd sync-vault
 cargo build --release
 
+# 3. Run
 ./target/release/sync-vault
 ```
 
-> ℹ️ On first launch macOS may show a security warning.
+**Optional: package as a `.app` bundle**
+
+```bash
+cargo install cargo-bundle
+cargo bundle --release
+open "target/release/bundle/osx/Sync Vault.app"
+```
+
+> ℹ️ On first launch macOS may show a security warning.  
 > Go to **System Settings → Privacy & Security** and click **Open Anyway**.
 
+> 🌏 CJK (Chinese/Japanese/Korean) fonts are embedded in the binary — no system font installation needed.
+
+> 💡 To sync to an external drive on macOS, use the drive's mount path, e.g. `/Volumes/MyDrive/backup`.
+
 ### Linux
+
 ```bash
 git clone https://github.com/1716775457damn/sync-vault.git
 cd sync-vault
@@ -149,7 +175,7 @@ src/
 ├── app.rs       # GUI (egui): config panel, log, stats, pause/resume
 ├── syncer.rs    # Core engine: SHA-256 hashing, atomic copy, full/incremental sync
 ├── watcher.rs   # File system event monitoring with debounce
-└── state.rs     # Hash snapshot persistence, config, exclude matching
+└── state.rs     # Hash snapshot persistence, config, ExcludeSet matching
 ```
 
 | Component | Crate | Why |
@@ -167,8 +193,10 @@ src/
 - **Size-first comparison** — files with different sizes skip hashing entirely
 - **Hash caching** — when size matches, hash is computed once and reused for both comparison and state update
 - **Streaming walk** — directory entries are processed one at a time, no upfront memory allocation
+- **Pre-compiled ExcludeSet** — exclude patterns compiled once per scan, O(1) HashSet lookup per segment
 - **Debounced events** — 300ms window prevents redundant syncs during rapid file changes
 - **Atomic state writes** — hash snapshot flushed at most once every 3 seconds
+- **Cached filter indices** — log filter results cached, rebuilt only when log or filter changes
 
 ---
 
