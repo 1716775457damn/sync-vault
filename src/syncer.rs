@@ -182,14 +182,16 @@ pub fn sync_file(
     excludes: &[String],
     tx: &std::sync::mpsc::Sender<SyncEvent>,
 ) {
-    let rel = match abs.strip_prefix(src) {
-        Ok(r) => r.to_string_lossy().replace('\\', "/"),
+    let rel_path = match abs.strip_prefix(src) {
+        Ok(r) => r,
         Err(_) => return,
     };
+    let rel = rel_path.to_string_lossy().replace('\\', "/");
 
     if ExcludeSet::new(excludes).matches(&rel) { return; }
 
-    let dst_path = dst.join(abs.strip_prefix(src).unwrap());
+    // Build dst_path directly from rel_path — no second strip_prefix needed
+    let dst_path = dst.join(rel_path);
 
     if !abs.exists() {
         let _ = std::fs::remove_file(&dst_path);

@@ -73,9 +73,10 @@ impl Store {
 
     pub fn flush_now(&mut self) {
         if !self.dirty { return; }
-        if let Ok(json) = serde_json::to_string(&self.state) {
+        // Use BufWriter to avoid intermediate String allocation
+        if let Ok(file) = std::fs::File::create(&self.path) {
             let _ = std::fs::create_dir_all(self.path.parent().unwrap());
-            let _ = std::fs::write(&self.path, json);
+            let _ = serde_json::to_writer(std::io::BufWriter::new(file), &self.state);
         }
         self.dirty = false;
         self.last_save = Instant::now();
