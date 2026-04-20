@@ -6,6 +6,20 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+/// Normalise a path string to NFC on macOS (HFS+ returns NFD).
+/// On other platforms returns the string unchanged.
+#[inline]
+fn nfc_path(s: std::borrow::Cow<'_, str>) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        OsStr::from_bytes(s.as_bytes()).to_string_lossy().into_owned()
+    }
+    #[cfg(not(target_os = "macos"))]
+    s.into_owned()
+}
+
 pub enum SyncEvent {
     Copied { rel: String, bytes: u64 },
     Deleted { rel: String },
@@ -43,7 +57,7 @@ fn scan_needed(
         if !entry.file_type().is_file() { continue; }
         let abs = entry.path();
         let rel = match abs.strip_prefix(src) {
-            Ok(r) => r.to_string_lossy().replace('\\', "/"),
+            Ok(r) => nfc_path(r.to_string_lossy()).replace('\\', "/"),
             Err(_) => continue,
         };
 
@@ -186,7 +200,8 @@ pub fn sync_file(
         Ok(r) => r,
         Err(_) => return,
     };
-    let rel = rel_path.to_string_lossy().replace('\\', "/");
+    let rel = rel_path.to_string_lossy();
+    let rel = nfc_path(rel).replace('\\', "/");
 
     if excludes.matches(&rel) { return; }
 

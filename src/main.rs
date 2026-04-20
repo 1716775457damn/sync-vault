@@ -3,7 +3,13 @@ mod state;
 mod syncer;
 mod watcher;
 
-fn main() -> eframe::Result {
+fn main() {
+    // On macOS, fall back to OpenGL if Metal fails (older Intel Mac / Rosetta)
+    #[cfg(target_os = "macos")]
+    if std::env::var("WGPU_BACKEND").is_err() {
+        unsafe { std::env::set_var("WGPU_BACKEND", "metal,gl"); }
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Sync Vault")
@@ -13,7 +19,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    eframe::run_native("Sync Vault", options, Box::new(|cc| {
+    if let Err(e) = eframe::run_native("Sync Vault", options, Box::new(|cc| {
         let mut fonts = egui::FontDefinitions::default();
         let cjk: &[u8] = include_bytes!("../assets/NotoSansSC-Regular.otf");
         fonts.font_data.insert("cjk".to_owned(), egui::FontData::from_static(cjk).into());
@@ -21,7 +27,17 @@ fn main() -> eframe::Result {
         fonts.families.entry(egui::FontFamily::Monospace).or_default().push("cjk".to_owned());
         cc.egui_ctx.set_fonts(fonts);
         Ok(Box::new(app::App::default()))
-    }))
+    })) {
+        eprintln!("sync-vault failed to start: {e}");
+        #[cfg(target_os = "macos")]
+        {
+            let msg = format!("sync-vault failed to start:\n{e}");
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", &format!("display alert \"Sync Vault\" message \"{msg}\"")])
+                .spawn();
+        }
+        std::process::exit(1);
+    }
 }
 
 fn make_icon() -> egui::IconData {
