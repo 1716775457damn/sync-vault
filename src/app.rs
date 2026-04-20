@@ -1,4 +1,4 @@
-use crate::state::{default_excludes, Config, Store};
+use crate::state::{default_excludes, Config, ExcludeSet, Store};
 use crate::syncer::{fmt_bytes, full_sync, sync_file, SyncEvent};
 use crate::watcher;
 use chrono::Local;
@@ -216,9 +216,10 @@ impl eframe::App for App {
                     let etx = etx.clone();
                     changed.sort(); changed.dedup();
                     std::thread::spawn(move || {
+                        let ex = ExcludeSet::new(&excludes); // build once for the whole batch
                         let mut st = store.lock().unwrap();
                         for path in changed {
-                            sync_file(&path, &src, &dst, &mut st, &excludes, &etx);
+                            sync_file(&path, &src, &dst, &mut st, &ex, &etx);
                         }
                         st.flush_if_needed();
                     });

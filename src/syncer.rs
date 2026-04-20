@@ -179,7 +179,7 @@ pub fn sync_file(
     src: &Path,
     dst: &Path,
     store: &mut Store,
-    excludes: &[String],
+    excludes: &ExcludeSet,
     tx: &std::sync::mpsc::Sender<SyncEvent>,
 ) {
     let rel_path = match abs.strip_prefix(src) {
@@ -188,7 +188,7 @@ pub fn sync_file(
     };
     let rel = rel_path.to_string_lossy().replace('\\', "/");
 
-    if ExcludeSet::new(excludes).matches(&rel) { return; }
+    if excludes.matches(&rel) { return; }
 
     // Build dst_path directly from rel_path — no second strip_prefix needed
     let dst_path = dst.join(rel_path);
