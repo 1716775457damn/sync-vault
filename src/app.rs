@@ -246,89 +246,122 @@ impl eframe::App for App {
         }
 
         // Config panel
-        egui::TopBottomPanel::top("config").show(ctx, |ui| {
-            ui.add_space(6.0);
+        egui::TopBottomPanel::top("config")
+            .frame(egui::Frame::side_top_panel(&ctx.style())
+                .inner_margin(egui::Margin { left: 14, right: 14, top: 10, bottom: 8 }))
+            .show(ctx, |ui| {
+            // Source row
             ui.horizontal(|ui| {
-                ui.label("源目录:");
+                ui.label(RichText::new("源目录").color(egui::Color32::from_rgb(140, 155, 175)).size(12.0));
                 let resp = ui.add(
                     TextEdit::singleline(&mut self.cfg.src)
-                        .desired_width(220.0)
+                        .desired_width(240.0)
                         .hint_text("要监控的文件夹…")
+                        .font(egui::TextStyle::Body)
                         .text_color(if self.src_error.is_some() {
-                            Color32::from_rgb(255, 100, 100)
+                            Color32::from_rgb(248, 113, 113)
                         } else {
-                            ui.visuals().text_color()
+                            Color32::from_rgb(220, 228, 240)
                         }),
                 );
                 if resp.changed() { self.src_error = None; }
-                if ui.button("📁").clicked() {
+                if ui.add(egui::Button::new("📁").min_size(egui::vec2(28.0, 28.0))).clicked() {
                     if let Some(p) = rfd::FileDialog::new().pick_folder() {
                         self.cfg.src = p.to_string_lossy().replace('\\', "/");
                         self.src_error = None;
                     }
                 }
+                if let Some(ref err) = self.src_error {
+                    ui.label(RichText::new(format!("⚠  {err}")).color(Color32::from_rgb(248, 113, 113)).size(11.5));
+                }
             });
-            if let Some(ref err) = self.src_error {
-                ui.label(RichText::new(err).small().color(Color32::from_rgb(255, 100, 100)));
-            }
+            // Dest row
             ui.horizontal(|ui| {
-                ui.label("目标目录:");
-                let resp = ui.add(TextEdit::singleline(&mut self.cfg.dst)
-                    .desired_width(220.0).hint_text("备份到哪里…")
-                    .text_color(if self.dst_error.is_some() {
-                        Color32::from_rgb(255, 100, 100)
-                    } else {
-                        ui.visuals().text_color()
-                    }));
+                ui.label(RichText::new("目标目录").color(egui::Color32::from_rgb(140, 155, 175)).size(12.0));
+                let resp = ui.add(
+                    TextEdit::singleline(&mut self.cfg.dst)
+                        .desired_width(240.0)
+                        .hint_text("备份到哪里…")
+                        .font(egui::TextStyle::Body)
+                        .text_color(if self.dst_error.is_some() {
+                            Color32::from_rgb(248, 113, 113)
+                        } else {
+                            Color32::from_rgb(220, 228, 240)
+                        }),
+                );
                 if resp.changed() { self.dst_error = None; }
-                if ui.button("📁").clicked() {
+                if ui.add(egui::Button::new("📁").min_size(egui::vec2(28.0, 28.0))).clicked() {
                     if let Some(p) = rfd::FileDialog::new().pick_folder() {
                         self.cfg.dst = p.to_string_lossy().replace('\\', "/");
                         self.dst_error = None;
                     }
                 }
+                if let Some(ref err) = self.dst_error {
+                    ui.label(RichText::new(format!("⚠  {err}")).color(Color32::from_rgb(248, 113, 113)).size(11.5));
+                }
             });
-            if let Some(ref err) = self.dst_error {
-                ui.label(RichText::new(err).small().color(Color32::from_rgb(255, 100, 100)));
-            }
+            // Controls row
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.cfg.delete_removed, "同步删除")
                     .on_hover_text("源目录删除的文件，目标目录也同步删除");
-                ui.separator();
-                if ui.small_button(if self.show_excludes { "▲ 排除规则" } else { "▼ 排除规则" }).clicked() {
+                ui.add(egui::Separator::default().vertical().spacing(4.0));
+                if ui.small_button(
+                    if self.show_excludes { "▲ 排除规则" } else { "▼ 排除规则" }
+                ).clicked() {
                     self.show_excludes = !self.show_excludes;
                 }
                 ui.add_space(8.0);
                 if self.running {
-                    if ui.button(RichText::new("⏹ 停止").color(Color32::RED)).clicked() { self.stop(); }
-                    // Pause/resume toggle
-                    let pause_label = if self.paused { "▶ 恢复" } else { "⏸ 暂停" };
-                    let pause_color = if self.paused { Color32::YELLOW } else { Color32::from_rgb(200,200,200) };
-                    if ui.button(RichText::new(pause_label).color(pause_color))
-                        .on_hover_text(if self.paused { "恢复监听文件变动" } else { "暂停监听，不停止已运行的同步" })
-                        .clicked() { self.paused = !self.paused; }
-                    if ui.button("🔄 立即同步").on_hover_text("触发一次全量增量同步").clicked() { self.resync(); }
-                    ui.spinner();
-                    let status = if self.paused {
-                        RichText::new("已暂停").color(Color32::YELLOW).small()
+                    if ui.add(
+                        egui::Button::new("⏹  停止")
+                            .fill(Color32::from_rgb(127, 29, 29))
+                            .min_size(egui::vec2(64.0, 28.0))
+                    ).clicked() { self.stop(); }
+
+                    let (pause_label, pause_fill) = if self.paused {
+                        ("▶  恢复", Color32::from_rgb(92, 78, 14))
                     } else {
-                        RichText::new("监控中…").color(Color32::GREEN).small()
+                        ("⏸  暂停", Color32::from_rgb(38, 42, 54))
                     };
-                    ui.label(status);
+                    if ui.add(
+                        egui::Button::new(pause_label)
+                            .fill(pause_fill)
+                            .min_size(egui::vec2(64.0, 28.0))
+                    ).on_hover_text(if self.paused { "恢复监听文件变动" } else { "暂停监听，不停止已运行的同步" })
+                        .clicked() { self.paused = !self.paused; }
+
+                    if ui.add(
+                        egui::Button::new("🔄  立即同步")
+                            .fill(Color32::from_rgb(6, 78, 59))
+                            .min_size(egui::vec2(80.0, 28.0))
+                    ).on_hover_text("触发一次全量增量同步").clicked() { self.resync(); }
+
+                    ui.spinner();
+                    let (status_text, status_color) = if self.paused {
+                        ("已暂停", Color32::from_rgb(251, 191, 36))
+                    } else {
+                        ("监控中…", Color32::from_rgb(52, 211, 153))
+                    };
+                    ui.label(RichText::new(status_text).color(status_color).size(12.0));
                 } else {
-                    if ui.button(RichText::new("▶ 开始同步").color(Color32::GREEN)).clicked() { self.start(); }
+                    if ui.add(
+                        egui::Button::new("▶  开始同步")
+                            .fill(Color32::from_rgb(6, 78, 59))
+                            .min_size(egui::vec2(88.0, 28.0))
+                    ).clicked() { self.start(); }
                 }
             });
 
             if self.show_excludes {
-                ui.separator();
-                ui.label(RichText::new("排除规则（文件名、目录名或 *.ext）").small().color(Color32::GRAY));
-                // Fixed-height scroll area prevents toolbar from growing and pushing log down
-                ScrollArea::vertical().id_salt("excl").max_height(120.0).show(ui, |ui| {
+                ui.add(egui::Separator::default().spacing(6.0));
+                ui.label(RichText::new("排除规则（文件名、目录名或 *.ext）")
+                    .color(Color32::from_rgb(120, 135, 155)).size(11.5));
+                ScrollArea::vertical().id_salt("excl").max_height(110.0).show(ui, |ui| {
                     let mut to_remove: Option<usize> = None;
-                    egui::Grid::new("excludes").num_columns(2).show(ui, |ui| {
+                    egui::Grid::new("excludes").num_columns(2).spacing(egui::vec2(6.0, 3.0)).show(ui, |ui| {
                         for (i, pat) in self.cfg.excludes.iter().enumerate() {
-                            ui.label(RichText::new(pat).monospace().small());
+                            ui.label(RichText::new(pat).monospace().size(12.0)
+                                .color(Color32::from_rgb(180, 195, 215)));
                             if ui.small_button("✕").clicked() { to_remove = Some(i); }
                             ui.end_row();
                         }
@@ -337,32 +370,39 @@ impl eframe::App for App {
                 });
                 ui.horizontal(|ui| {
                     ui.add(TextEdit::singleline(&mut self.new_exclude)
-                        .desired_width(160.0).hint_text("node_modules 或 *.log"));
-                    if ui.small_button("添加").clicked() && !self.new_exclude.is_empty() {
+                        .desired_width(180.0)
+                        .hint_text("node_modules 或 *.log")
+                        .font(egui::TextStyle::Small));
+                    if ui.add(
+                        egui::Button::new("+ 添加")
+                            .fill(Color32::from_rgb(30, 58, 50))
+                    ).clicked() && !self.new_exclude.is_empty() {
                         self.cfg.excludes.push(self.new_exclude.drain(..).collect());
                         self.cfg.save();
                     }
                 });
             }
-            ui.add_space(4.0);
         });
 
         // Status bar
-        egui::TopBottomPanel::bottom("stats").show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("stats")
+            .frame(egui::Frame::side_top_panel(&ctx.style())
+                .inner_margin(egui::Margin { left: 14, right: 14, top: 5, bottom: 5 }))
+            .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if let Some(scanned) = self.progress {
                     ui.spinner();
                     ui.label(RichText::new(format!("已扫描 {} 个文件", scanned))
-                        .small().color(Color32::from_rgb(100, 180, 255)));
-                    ui.separator();
+                        .size(11.5).color(Color32::from_rgb(96, 165, 250)));
+                    ui.add(egui::Separator::default().vertical().spacing(4.0));
                 }
                 if self.session_copied > 0 {
                     ui.label(RichText::new(format!(
-                        "本次: {} 个文件 {}", self.session_copied, fmt_bytes(self.session_bytes)
-                    )).small().color(Color32::from_rgb(100, 220, 100)));
-                    ui.separator();
+                        "本次: {} 个文件  {}", self.session_copied, fmt_bytes(self.session_bytes)
+                    )).size(11.5).color(Color32::from_rgb(52, 211, 153)));
+                    ui.add(egui::Separator::default().vertical().spacing(4.0));
                 }
-                ui.label(RichText::new(&self.stats_str).small().color(Color32::GRAY));
+                ui.label(RichText::new(&self.stats_str).size(11.5).color(Color32::from_rgb(100, 116, 139)));
             });
         });
 
