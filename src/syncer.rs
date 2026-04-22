@@ -1,14 +1,13 @@
 use crate::state::{ExcludeSet, FileRecord, Store};
 use anyhow::Result;
 use chrono::Local;
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
-/// NFD → NFC using unicode-normalization.
-/// macOS HFS+ stores filenames in NFD; without this CJK paths are garbled.
 #[inline]
 fn nfc_path(s: std::borrow::Cow<'_, str>) -> String {
     if s.is_ascii() { return s.into_owned(); }
@@ -19,14 +18,13 @@ pub enum SyncEvent {
     Copied { rel: String, bytes: u64 },
     Deleted { rel: String },
     Error { rel: String, err: String },
-    /// scanned == total signals completion (total == 0 means unknown)
     Progress { scanned: usize, total: usize },
 }
 
 pub fn hash_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 256 * 1024]; // 256 KB — matches SSD optimal I/O size
+    let mut buf = vec![0u8; 256 * 1024];
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 { break; }
@@ -35,18 +33,22 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// Phase 1: scan src without holding the store lock.
-/// Returns list of (rel, abs, size, hash) that need copying.
+/// Three-stage fast-path:
+/// Stage 1 — size differs          → must copy, skip hash
+/// Stage 2 — size same, mtime same → unchanged, skip hash entirely
+/// Stage 3 — size same, mtime diff → hash to confirm
 fn scan_needed(
     src: &Path,
     store: &Store,
     excludes: &[String],
     tx: &std::sync::mpsc::Sender<SyncEvent>,
 ) -> (Vec<(String, PathBuf, u64, String)>, std::collections::HashSet<String>) {
-    let ex = ExcludeSet::new(excludes); // compile once, reuse per file
-    let mut to_copy: Vec<(String, PathBuf, u64, String)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let ex = ExcludeSet::new(excludes);
+    let mut seen    = std::collections::HashSet::new();
     let mut scanned = 0usize;
+
+    let mut need_hash:    Vec<(String, PathBuf, u64)> = Vec::new();
+    let mut size_changed: Vec<(String, PathBuf, u64)> = Vec::new();
 
     for entry in WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() { continue; }
@@ -64,43 +66,63 @@ fn scan_needed(
         if ex.matches(&rel) { continue; }
         seen.insert(rel.clone());
 
-        let size = match std::fs::metadata(abs) {
-            Ok(m) => m.len(),
+        let meta = match entry.metadata().or_else(|_| std::fs::metadata(abs)) {
+            Ok(m) => m,
             Err(_) => continue,
         };
+        let size = meta.len();
 
-        let existing = store.state.files.get(&rel);
-        let (needs_copy, cached_hash) = match existing {
-            None => (true, None),
+        match store.state.files.get(&rel) {
+            None => {
+                need_hash.push((rel, abs.to_path_buf(), size));
+            }
             Some(rec) => {
                 if rec.size != size {
-                    (true, None)
+                    size_changed.push((rel, abs.to_path_buf(), size));
                 } else {
-                    match hash_file(abs) {
-                        Ok(h) => { let changed = h != rec.hash; (changed, Some(h)) }
-                        Err(_) => (true, None),
-                    }
+                    let mtime = meta.modified()
+                        .ok()
+                        .map(|t| chrono::DateTime::<Local>::from(t).timestamp())
+                        .unwrap_or(0);
+                    if rec.modified.timestamp() == mtime { continue; }
+                    need_hash.push((rel, abs.to_path_buf(), size));
                 }
             }
-        };
-
-        if !needs_copy { continue; }
-
-        let hash = match cached_hash {
-            Some(h) => h,
-            None => match hash_file(abs) {
-                Ok(h) => h,
-                Err(e) => {
-                    let _ = tx.send(SyncEvent::Error { rel, err: e.to_string() });
-                    continue;
-                }
-            }
-        };
-
-        to_copy.push((rel, abs.to_path_buf(), size, hash));
+        }
     }
-
     let _ = tx.send(SyncEvent::Progress { scanned, total: scanned });
+
+    // Pre-extract cached hashes to avoid borrowing store inside par_iter
+    let cached: std::collections::HashMap<String, String> = need_hash.iter()
+        .filter_map(|(rel, _, size)| {
+            store.state.files.get(rel)
+                .filter(|rec| rec.size == *size)
+                .map(|rec| (rel.clone(), rec.hash.clone()))
+        })
+        .collect();
+
+    // Parallel hash of mtime-changed candidates
+    let mut to_copy: Vec<(String, PathBuf, u64, String)> = need_hash
+        .into_par_iter()
+        .filter_map(|(rel, abs, size)| {
+            let hash = hash_file(&abs).ok()?;
+            if let Some(cached_hash) = cached.get(&rel) {
+                if *cached_hash == hash { return None; }
+            }
+            Some((rel, abs, size, hash))
+        })
+        .collect();
+
+    // Parallel hash of size-changed files
+    let size_changed_hashed: Vec<(String, PathBuf, u64, String)> = size_changed
+        .into_par_iter()
+        .filter_map(|(rel, abs, size)| {
+            let hash = hash_file(&abs).ok()?;
+            Some((rel, abs, size, hash))
+        })
+        .collect();
+
+    to_copy.extend(size_changed_hashed);
     (to_copy, seen)
 }
 
@@ -112,17 +134,13 @@ pub fn full_sync(
     excludes: &[String],
     tx: &std::sync::mpsc::Sender<SyncEvent>,
 ) {
-    // Phase 1: scan without lock (store is already locked by caller, but
-    // we do the expensive I/O before touching state)
     let (to_copy, seen) = scan_needed(src, store, excludes, tx);
 
-    // Phase 2: copy files and update state
     for (rel, abs, size, hash) in to_copy {
         let dst_path = dst.join(&rel);
         atomic_copy(&abs, &dst_path, &rel, hash, size, store, tx);
     }
 
-    // Phase 3: delete removed
     if delete_removed {
         let removed: Vec<String> = store.state.files.keys()
             .filter(|k| !seen.contains(*k))
@@ -141,28 +159,18 @@ pub fn full_sync(
     store.mark_dirty();
 }
 
-/// Atomic copy: write to a temp file first, then rename — prevents corrupt dst on crash
 fn atomic_copy(
-    src: &Path,
-    dst: &Path,
-    rel: &str,
-    hash: String,
-    size: u64,
+    src: &Path, dst: &Path, rel: &str,
+    hash: String, size: u64,
     store: &mut Store,
     tx: &std::sync::mpsc::Sender<SyncEvent>,
 ) {
-    if let Some(parent) = dst.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    // Append .svtmp to full filename (not replace extension) to avoid name collisions
+    if let Some(parent) = dst.parent() { let _ = std::fs::create_dir_all(parent); }
     let tmp = dst.with_file_name(format!(
-        "{}.svtmp",
-        dst.file_name().unwrap_or_default().to_string_lossy()
+        "{}.svtmp", dst.file_name().unwrap_or_default().to_string_lossy()
     ));
     match std::fs::copy(src, &tmp) {
         Ok(bytes) => {
-            // Atomic rename
             if let Err(e) = std::fs::rename(&tmp, dst) {
                 let _ = std::fs::remove_file(&tmp);
                 let _ = tx.send(SyncEvent::Error { rel: rel.to_string(), err: e.to_string() });
@@ -191,16 +199,10 @@ pub fn sync_file(
     excludes: &ExcludeSet,
     tx: &std::sync::mpsc::Sender<SyncEvent>,
 ) {
-    let rel_path = match abs.strip_prefix(src) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-    let rel = rel_path.to_string_lossy();
-    let rel = nfc_path(rel).replace('\\', "/");
-
+    let rel_path = match abs.strip_prefix(src) { Ok(r) => r, Err(_) => return };
+    let rel = nfc_path(rel_path.to_string_lossy()).replace('\\', "/");
     if excludes.matches(&rel) { return; }
 
-    // Build dst_path directly from rel_path — no second strip_prefix needed
     let dst_path = dst.join(rel_path);
 
     if !abs.exists() {
@@ -211,14 +213,21 @@ pub fn sync_file(
         return;
     }
 
-    let size = match std::fs::metadata(abs) {
-        Ok(m) => m.len(),
+    let meta = match std::fs::metadata(abs) {
+        Ok(m) => m,
         Err(e) => { let _ = tx.send(SyncEvent::Error { rel, err: e.to_string() }); return; }
     };
+    let size = meta.len();
 
-    // Quick size check before hashing
     if let Some(rec) = store.state.files.get(&rel) {
         if rec.size == size {
+            // mtime check before hashing
+            let mtime = meta.modified()
+                .ok()
+                .map(|t| chrono::DateTime::<Local>::from(t).timestamp())
+                .unwrap_or(0);
+            if rec.modified.timestamp() == mtime { return; }
+
             let hash = match hash_file(abs) {
                 Ok(h) => h,
                 Err(e) => { let _ = tx.send(SyncEvent::Error { rel, err: e.to_string() }); return; }
@@ -229,7 +238,6 @@ pub fn sync_file(
         }
     }
 
-    // Size changed or new file
     let hash = match hash_file(abs) {
         Ok(h) => h,
         Err(e) => { let _ = tx.send(SyncEvent::Error { rel, err: e.to_string() }); return; }
