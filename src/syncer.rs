@@ -4,20 +4,15 @@ use chrono::Local;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
-/// Normalise a path string to NFC on macOS (HFS+ returns NFD).
-/// On other platforms returns the string unchanged.
+/// NFD → NFC using unicode-normalization.
+/// macOS HFS+ stores filenames in NFD; without this CJK paths are garbled.
 #[inline]
 fn nfc_path(s: std::borrow::Cow<'_, str>) -> String {
-    #[cfg(target_os = "macos")]
-    {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-        OsStr::from_bytes(s.as_bytes()).to_string_lossy().into_owned()
-    }
-    #[cfg(not(target_os = "macos"))]
-    s.into_owned()
+    if s.is_ascii() { return s.into_owned(); }
+    s.nfc().collect()
 }
 
 pub enum SyncEvent {
