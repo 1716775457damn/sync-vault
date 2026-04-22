@@ -31,7 +31,7 @@ pub enum SyncEvent {
 pub fn hash_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 65536];
+    let mut buf = vec![0u8; 256 * 1024]; // 256 KB — matches SSD optimal I/O size
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 { break; }
